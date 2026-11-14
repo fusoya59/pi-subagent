@@ -1,0 +1,15 @@
+{
+  "name": "pi-subagent",
+  "version": "1.0.0",
+  "description": "Pi subagent extension with per-call model and thinking overrides",
+  "keywords": [
+    "pi-package"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  }
+}
