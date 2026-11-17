@@ -2,6 +2,8 @@
 
 Fork of Pi's `subagent` example extension. Runs specialized subagents in isolated `pi` processes and adds per-invocation `model` and `thinking` overrides plus frontmatter `thinking` support.
 
+The extension also adds three commands: `/subagent-list`, `/subagent-runs`, and `/subagent-widget`.
+
 ## Installation
 
 Install the public Git package:
@@ -10,17 +12,19 @@ Install the public Git package:
 pi install git:github.com/fusoya59/pi-subagent
 ```
 
-Then run `/reload` in Pi. The `agents/` files in this repository are examples. The package does not load them automatically.
+Then run `/reload` in Pi.
 
 The extension discovers agents from `~/.pi/agent/agents/`; project agents require `agentScope: "project"` or "both".
 
-## Included Agents
+## Example Agents
 
-| Agent | Purpose | Default Model |
+The package does not load these files. Copy the ones you want to `~/.pi/agent/agents/` to use them.
+
+| Agent | Purpose | Model |
 |---|---|---|
 | `explore` | Read-only codebase reconnaissance | `opencode-go/deepseek-v4.1-flash` |
-| `plan-reviewer` | Audits implementation plans | `opencode-go/deepseek-v4.1-flash` |
-| `code-reviewer` | Reviews code diffs against plans | `opencode-go/deepseek-v4.1-flash` |
+| `plan-reviewer` | Audits implementation plans | `openai/gpt-6.1-terra` |
+| `code-reviewer` | Reviews code diffs against plans | `agy/gemini-4-hydrogen` |
 | `coder` | Implements changes per plan | `opencode-go/deepseek-v4.1-flash` |
 
 
@@ -32,7 +36,7 @@ The tool runs one subagent per call:
 const result = await tools.subagent({
   agent: "explore",
   task: "Inspect the authentication flow and report relevant files.",
-  model: "opencode-go/deepseek-v4.1-flash",
+  model: "agy/gemini-4-hydrogen",
   thinking: "low"
 });
 return result;
@@ -70,6 +74,28 @@ const review = await tools.subagent({
 return review;
 ```
 
+## Commands
+
+The extension adds three commands. All need interactive mode.
+
+| Command | Purpose |
+|---|---|
+| `/subagent-list` | List the available agents. Enter opens the configuration and system prompt. |
+| `/subagent-runs` | Browse the runs of the current session. Enter opens the transcript, usage, and cost. |
+| `/subagent-widget` | Toggle the live progress widget on or off. |
+
+Keys: `↑↓`/`PgUp/PgDn` move or scroll, `Enter` opens, `Esc` closes.
+
+Runs survive a restart and `/reload`. Direct runs rebuild from the session branch with their full transcripts. Nested runs, such as codemode calls, restore from summary entries and a transcript cache at `~/.pi/agent/subagent-transcripts/` (files older than 14 days are deleted).
+
+## Live Progress
+
+While a subagent runs, a widget above the editor shows one line per run:
+
+```text
+⏳ code-reviewer · gemini-4-hydrogen · hi — read src/app.ts  · 3t $0.0142
+```
+
 ## Model and Thinking Precedence
 
 Both `model` and `thinking` resolve in this order (highest to lowest):
@@ -85,7 +111,7 @@ Both `model` and `thinking` resolve in this order (highest to lowest):
 name: my-agent
 description: Short summary of the agent role
 tools: read, grep, find, ls, bash
-model: antigravity/gemini-4-argon
+model: agy/gemini-4-argon
 thinking: medium
 ---
 

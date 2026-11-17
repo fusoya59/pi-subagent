@@ -7,6 +7,10 @@
  * Delegates one task to a specialized subagent with an isolated context.
  *
  * Uses JSON mode to capture structured output from subagents.
+ *
+ * Also registers two commands: /subagent-list shows the available agents,
+ * and /subagent-runs shows the runs with their transcripts. While a
+ * subagent runs, a live widget above the editor shows its progress.
  */
 
 import { spawn } from "node:child_process";
@@ -14,223 +18,45 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentToolResult, ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { Message } from "@earendil-works/pi-ai";
-import { StringEnum } from "@earendil-works/pi-ai";
+import { StringEnum, type Message } from "@earendil-works/pi-ai";
 import {
 	CONFIG_DIR_NAME,
-	DEFAULT_MAX_BYTES,
-	DEFAULT_MAX_LINES,
 	type ExtensionAPI,
-	formatReadLineRange,
+	type ExtensionContext,
 	getAgentDir,
 	getMarkdownTheme,
 	type JsonAgentSessionEvent,
-	truncateHead,
 	withFileMutationQueue,
 } from "@earendil-works/pi-coding-agent";
 import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { type AgentConfig, type AgentScope, discoverAgents } from "./agents.ts";
-
-const COLLAPSED_ITEM_COUNT = 10;
-const TRUNCATION_NOTICE_RESERVE = 256;
-
-function formatTokens(count: number): string {
-	if (count < 1000) return count.toString();
-	if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
-	if (count < 1000000) return `${Math.round(count / 1000)}k`;
-	return `${(count / 1000000).toFixed(1)}M`;
-}
-
-function formatUsageStats(
-	usage: {
-		input: number;
-		output: number;
-		cacheRead: number;
-		cacheWrite: number;
-		cost: number;
-		contextTokens?: number;
-		turns?: number;
-	},
-	model?: string,
-): string {
-	const parts: string[] = [];
-	if (usage.turns) parts.push(`${usage.turns} turn${usage.turns > 1 ? "s" : ""}`);
-	if (usage.input) parts.push(`↑${formatTokens(usage.input)}`);
-	if (usage.output) parts.push(`↓${formatTokens(usage.output)}`);
-	if (usage.cacheRead) parts.push(`R${formatTokens(usage.cacheRead)}`);
-	if (usage.cacheWrite) parts.push(`W${formatTokens(usage.cacheWrite)}`);
-	if (usage.cost) parts.push(`$${usage.cost.toFixed(4)}`);
-	if (usage.contextTokens && usage.contextTokens > 0) {
-		parts.push(`ctx:${formatTokens(usage.contextTokens)}`);
-	}
-	if (model) parts.push(model);
-	return parts.join(" ");
-}
-
-function formatToolCall(
-	toolName: string,
-	args: Record<string, unknown>,
-	themeFg: (color: any, text: string) => string,
-): string {
-	const shortenPath = (p: string) => {
-		const home = os.homedir();
-		return p.startsWith(home) ? `~${p.slice(home.length)}` : p;
-	};
-
-	switch (toolName) {
-		case "bash": {
-			const command = (args.command as string) || "...";
-			const preview = command.length > 60 ? `${command.slice(0, 60)}...` : command;
-			return themeFg("muted", "$ ") + themeFg("toolOutput", preview);
-		}
-		case "read": {
-			const rawPath = (args.file_path || args.path || "...") as string;
-			const filePath = shortenPath(rawPath);
-			const lineRange = formatReadLineRange(args.offset, args.limit);
-			let text = themeFg("accent", filePath);
-			if (lineRange) {
-				text += themeFg("warning", lineRange);
-			}
-			return themeFg("muted", "read ") + text;
-		}
-		case "write": {
-			const rawPath = (args.file_path || args.path || "...") as string;
-			const filePath = shortenPath(rawPath);
-			const content = (args.content || "") as string;
-			const lines = content.split("\n").length;
-			let text = themeFg("muted", "write ") + themeFg("accent", filePath);
-			if (lines > 1) text += themeFg("dim", ` (${lines} lines)`);
-			return text;
-		}
-		case "edit": {
-			const rawPath = (args.file_path || args.path || "...") as string;
-			return themeFg("muted", "edit ") + themeFg("accent", shortenPath(rawPath));
-		}
-		case "ls": {
-			const rawPath = (args.path || ".") as string;
-			return themeFg("muted", "ls ") + themeFg("accent", shortenPath(rawPath));
-		}
-		case "find": {
-			const pattern = (args.pattern || "*") as string;
-			const rawPath = (args.path || ".") as string;
-			return themeFg("muted", "find ") + themeFg("accent", pattern) + themeFg("dim", ` in ${shortenPath(rawPath)}`);
-		}
-		case "grep": {
-			const pattern = (args.pattern || "") as string;
-			const rawPath = (args.path || ".") as string;
-			return (
-				themeFg("muted", "grep ") +
-				themeFg("accent", `/${pattern}/`) +
-				themeFg("dim", ` in ${shortenPath(rawPath)}`)
-			);
-		}
-		default: {
-			const argsStr = JSON.stringify(args);
-			const preview = argsStr.length > 50 ? `${argsStr.slice(0, 50)}...` : argsStr;
-			return themeFg("accent", toolName) + themeFg("dim", ` ${preview}`);
-		}
-	}
-}
-
-interface UsageStats {
-	input: number;
-	output: number;
-	cacheRead: number;
-	cacheWrite: number;
-	cost: number;
-	contextTokens: number;
-	turns: number;
-}
-
-type ChildStatus = "pending" | "running" | "completed" | "failed" | "aborted";
-
-interface SingleResult {
-	agent: string;
-	agentSource: "package" | "user" | "project" | "unknown";
-	task: string;
-	status: ChildStatus;
-	exitCode: number | null;
-	messages: Message[];
-	stderr: string;
-	usage: UsageStats;
-	model?: string;
-	stopReason?: string;
-	errorMessage?: string;
-	terminationSignal?: NodeJS.Signals;
-	step?: number;
-}
-
-interface SubagentDetails {
-	mode: "single";
-	results: SingleResult[];
-	isError: boolean;
-}
-
-function getFinalOutput(messages: Message[]): string {
-	for (let i = messages.length - 1; i >= 0; i--) {
-		const msg = messages[i];
-		if (msg.role === "assistant") {
-			for (const part of msg.content) {
-				if (part.type === "text") return part.text;
-			}
-		}
-	}
-	return "";
-}
-
-function isFailedResult(result: SingleResult): boolean {
-	return result.status === "failed" || result.status === "aborted";
-}
-
-function getFailureEvidence(result: SingleResult): string {
-	const evidence: string[] = [];
-	const seen = new Set<string>();
-	const add = (label: string, value: string | undefined) => {
-		const text = value?.trim();
-		if (!text || seen.has(text)) return;
-		seen.add(text);
-		evidence.push(`${label}: ${text}`);
-	};
-
-	add("Error", result.errorMessage);
-	add("Signal", result.terminationSignal);
-	add("stderr", result.stderr);
-	add("Assistant output", getFinalOutput(result.messages));
-	return evidence.join("\n\n") || "(no output)";
-}
-
-function getResultOutput(result: SingleResult): string {
-	return isFailedResult(result) ? getFailureEvidence(result) : getFinalOutput(result.messages) || "(no output)";
-}
-
-function truncateModelOutput(output: string): string {
-	const initial = truncateHead(output);
-	if (!initial.truncated) return output;
-
-	const body = truncateHead(output, {
-		maxLines: DEFAULT_MAX_LINES - 2,
-		maxBytes: DEFAULT_MAX_BYTES - TRUNCATION_NOTICE_RESERVE,
-	});
-	const omittedBytes = initial.totalBytes - body.outputBytes;
-	const notice = `[Output truncated: ${omittedBytes} bytes omitted. Full output preserved in tool details.]`;
-	return body.content ? `${body.content}\n\n${notice}` : notice;
-}
-
-type DisplayItem = { type: "text"; text: string } | { type: "toolCall"; name: string; args: Record<string, any> };
-
-function getDisplayItems(messages: Message[]): DisplayItem[] {
-	const items: DisplayItem[] = [];
-	for (const msg of messages) {
-		if (msg.role === "assistant") {
-			for (const part of msg.content) {
-				if (part.type === "text") items.push({ type: "text", text: part.text });
-				else if (part.type === "toolCall") items.push({ type: "toolCall", name: part.name, args: part.arguments });
-			}
-		}
-	}
-	return items;
-}
+import { registerSubagentCommands, registerWidgetToggleCommand } from "./commands.ts";
+import { updateLiveWidget } from "./live.ts";
+import {
+	type BranchEntry,
+	isPersistedRun,
+	persistRun,
+	pruneTranscripts,
+	restoreRun,
+	runsFromToolResults,
+	RUN_ENTRY_TYPE,
+	writeTranscript,
+} from "./persistence.ts";
+import { readWidgetSetting, writeWidgetSetting } from "./settings.ts";
+import {
+	COLLAPSED_ITEM_COUNT,
+	formatToolCall,
+	formatUsageStats,
+	getDisplayItems,
+	getFinalOutput,
+	getResultOutput,
+	isFailedResult,
+	statusIcon,
+	truncateModelOutput,
+} from "./render.ts";
+import { RunStore } from "./runs-store.ts";
+import type { SingleResult, SubagentDetails } from "./types.ts";
 
 async function writePromptToTempFile(agentName: string, prompt: string): Promise<{ dir: string; filePath: string }> {
 	const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-subagent-"));
@@ -360,7 +186,9 @@ async function runSingleAgent(
 		stderr: "",
 		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
 		model,
+		thinking,
 		step,
+		cwd: effectiveCwd,
 	};
 
 	const emitUpdate = () => {
@@ -551,12 +379,87 @@ const SubagentParams = Type.Object({
 });
 
 export default function (pi: ExtensionAPI) {
+	// Records of finished runs, read by the /subagent-runs command.
+	const runStore = new RunStore();
+
+	// Live widget on/off. Read the setting when the session starts, not
+	// during loading: action methods cannot run while the extension loads.
+	// The /subagent-widget command toggles it and writes the user settings file.
+	let widgetEnabled = true;
+	pi.on("session_start", async () => {
+		widgetEnabled = readWidgetSetting(pi.getSettings() as Record<string, unknown>);
+	});
+	registerWidgetToggleCommand(
+		pi,
+		() => widgetEnabled,
+		(enabled) => {
+			widgetEnabled = enabled;
+			try {
+				writeWidgetSetting(enabled);
+				return true;
+			} catch {
+				return false;
+			}
+		},
+		(ctx) => updateLiveWidget(ctx, []),
+		(ctx) => updateLiveWidget(ctx, runStore.running()),
+	);
+	registerSubagentCommands(pi, runStore);
+
 	// Tool execute results cannot set runtime error state directly, so patch it through the result hook.
 	pi.on("tool_result", (event) => {
 		if (event.toolName !== "subagent") return;
 		const details = event.details as SubagentDetails | undefined;
+		// A nested call, for example from a codemode script, does not enter
+		// the session transcript. Keep a summary entry for the runs view,
+		// and save the full transcript in the extension cache.
+		if (event.parentToolCallId) {
+			const record = runStore.getByToolCallId(event.toolCallId);
+			if (record) {
+				let transcriptFile: string | undefined;
+				try {
+					transcriptFile = writeTranscript(record);
+				} catch {
+					/* keep the summary entry without the transcript */
+				}
+				try {
+					pi.appendEntry(RUN_ENTRY_TYPE, persistRun(record, transcriptFile));
+				} catch {
+					/* no session file */
+				}
+			}
+		}
 		if (details?.isError) return { isError: true };
 	});
+
+	// A session change or a /tree move replaces the recorded runs with the
+	// runs that the session branch holds. Direct runs come from their tool
+	// results, with the full transcript. Nested runs come from their
+	// summary entries.
+	const rebuildRuns = (ctx: ExtensionContext) => {
+		runStore.clear();
+		pruneTranscripts();
+		const entries = ctx.sessionManager.getBranch() as BranchEntry[];
+		let number = 1;
+		for (const run of runsFromToolResults(entries)) {
+			runStore.restore({
+				number: number++,
+				toolCallId: run.toolCallId,
+				recordedAt: run.finishedAt,
+				finishedAt: run.finishedAt,
+				result: run.result,
+			});
+		}
+		for (const entry of entries) {
+			if (entry.type !== "custom" || entry.customType !== RUN_ENTRY_TYPE) continue;
+			if (!isPersistedRun(entry.data)) continue;
+			if (entry.data.toolCallId && runStore.getByToolCallId(entry.data.toolCallId)) continue;
+			if (runStore.get(entry.data.number)) continue;
+			runStore.restore(restoreRun(entry.data));
+		}
+	};
+	pi.on("session_start", async (_event, ctx) => rebuildRuns(ctx));
+	pi.on("session_tree", async (_event, ctx) => rebuildRuns(ctx));
 
 	pi.registerTool({
 		name: "subagent",
@@ -568,7 +471,7 @@ export default function (pi: ExtensionAPI) {
 		].join(" "),
 		parameters: SubagentParams,
 
-		async execute(_toolCallId, params, signal, onUpdate, ctx) {
+		async execute(toolCallId, params, signal, onUpdate, ctx) {
 			const agentScope: AgentScope = params.agentScope ?? "user";
 			const dispatchDefaults: DispatchDefaults = {
 				model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
@@ -636,6 +539,15 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (params.agent && params.task && resolvedSingle) {
+				// Forward each live update, and record it for the runs view and the live widget.
+				const onLiveUpdate: OnUpdateCallback = (partial) => {
+					onUpdate?.(partial);
+					const results = partial.details?.results;
+					if (results?.length) {
+						runStore.upsert(toolCallId, results);
+						if (widgetEnabled) updateLiveWidget(ctx, runStore.running());
+					}
+				};
 				const result = await runSingleAgent(
 					dispatchDefaults,
 					resolvedSingle,
@@ -645,9 +557,11 @@ export default function (pi: ExtensionAPI) {
 					params.model,
 					params.thinking,
 					signal,
-					onUpdate,
+					onLiveUpdate,
 					makeDetails(),
 				);
+				runStore.upsert(toolCallId, [result]);
+				if (widgetEnabled) updateLiveWidget(ctx, runStore.running());
 				const isError = isFailedResult(result);
 				if (isError) {
 					const errorMsg = getResultOutput(result);
@@ -700,7 +614,7 @@ export default function (pi: ExtensionAPI) {
 
 			const mdTheme = getMarkdownTheme();
 
-			const renderDisplayItems = (items: DisplayItem[], limit?: number) => {
+			const renderDisplayItems = (items: ReturnType<typeof getDisplayItems>, limit?: number) => {
 				const toShow = limit ? items.slice(-limit) : items;
 				const skipped = limit && items.length > limit ? items.length - limit : 0;
 				let text = "";
@@ -716,27 +630,19 @@ export default function (pi: ExtensionAPI) {
 				return text.trimEnd();
 			};
 
-			const resultIcon = (child: SingleResult): string => {
-				if (child.status === "pending" || child.status === "running") {
-					return theme.fg("warning", "⏳");
-				}
-				if (isFailedResult(child)) return theme.fg("error", "✗");
-				return theme.fg("success", "✓");
-			};
-
 			if (details.mode === "single" && details.results.length === 1) {
 				const r = details.results[0];
 				const isError = isFailedResult(r);
 				const isRunning = r.status === "pending" || r.status === "running";
-				const icon = resultIcon(r);
+				const icon = statusIcon(r.status, theme.fg.bind(theme));
 				const displayItems = getDisplayItems(r.messages);
 				const finalOutput = getFinalOutput(r.messages);
 
 				if (expanded) {
 					const container = new Container();
 					let header = `${icon} ${theme.fg("toolTitle", theme.bold(r.agent))}${theme.fg("muted", ` (${r.agentSource})`)}`;
-					if (isRunning) header += ` ${theme.fg("warning", `[${r.status}]`)}`;
-					else if (isError) header += ` ${theme.fg("error", `[${r.stopReason ?? r.status}]`)}`;
+					if (isRunning) header += ` ${theme.fg("warning", "[${r.status}]")}`;
+					else if (isError) header += ` ${theme.fg("error", "[${r.stopReason ?? r.status}]")}`;
 					container.addChild(new Text(header, 0, 0));
 					if (isError && r.errorMessage)
 						container.addChild(new Text(theme.fg("error", `Error: ${r.errorMessage}`), 0, 0));
@@ -766,7 +672,7 @@ export default function (pi: ExtensionAPI) {
 							container.addChild(new Markdown(finalOutput.trim(), 0, 0, mdTheme));
 						}
 					}
-					const usageStr = formatUsageStats(r.usage, r.model);
+					const usageStr = formatUsageStats(r.usage, r.model, r.thinking);
 					if (usageStr) {
 						container.addChild(new Spacer(1));
 						container.addChild(new Text(theme.fg("dim", usageStr), 0, 0));
@@ -775,15 +681,15 @@ export default function (pi: ExtensionAPI) {
 				}
 
 				let text = `${icon} ${theme.fg("toolTitle", theme.bold(r.agent))}${theme.fg("muted", ` (${r.agentSource})`)}`;
-				if (isRunning) text += ` ${theme.fg("warning", `[${r.status}]`)}`;
-				else if (isError) text += ` ${theme.fg("error", `[${r.stopReason ?? r.status}]`)}`;
+				if (isRunning) text += ` ${theme.fg("warning", "[${r.status}]")}`;
+				else if (isError) text += ` ${theme.fg("error", "[${r.stopReason ?? r.status}]")}`;
 				if (isError && r.errorMessage) text += `\n${theme.fg("error", `Error: ${r.errorMessage}`)}`;
 				else if (displayItems.length === 0) text += `\n${theme.fg("muted", "(no output)")}`;
 				else {
 					text += `\n${renderDisplayItems(displayItems, COLLAPSED_ITEM_COUNT)}`;
 					if (displayItems.length > COLLAPSED_ITEM_COUNT) text += `\n${theme.fg("muted", "(Ctrl+O to expand)")}`;
 				}
-				const usageStr = formatUsageStats(r.usage, r.model);
+				const usageStr = formatUsageStats(r.usage, r.model, r.thinking);
 				if (usageStr) text += `\n${theme.fg("dim", usageStr)}`;
 				return new Text(text, 0, 0);
 			}
