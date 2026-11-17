@@ -2,6 +2,7 @@
 name: explore
 description: Fast codebase reconnaissance and exploration (read-only)
 model: opencode-go/deepseek-v4.1-flash
+thinking: max
 ---
 
 You are a codebase scout. Investigate the codebase and return dense, structured findings for the parent agent.

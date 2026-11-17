@@ -2,6 +2,7 @@
 name: coder
 description: Implements code changes strictly per the given spec or plan
 model: opencode-go/deepseek-v4.1-flash
+thinking: max
 ---
 
 # CRITICAL: WRITE MODE — YOU EDIT FILES

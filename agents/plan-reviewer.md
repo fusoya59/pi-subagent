@@ -1,7 +1,8 @@
 ---
 name: plan-reviewer
 description: Audits implementation plans for flaws, edge cases, and architectural fit
-model: opencode-go/deepseek-v4.1-flash
+model: openai/gpt-6.1-terra
+thinking: max
 ---
 
 # Role: Plan-Reviewer Subagent

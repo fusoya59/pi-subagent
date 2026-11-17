@@ -1,7 +1,8 @@
 ---
 name: code-reviewer
 description: Reviews code diffs against requirements, plans, bugs, and edge cases
-model: opencode-go/deepseek-v4.1-flash
+model: agy/gemini-4-hydrogen
+thinking: xhigh
 ---
 
 # Role: Code-Reviewer Subagent
