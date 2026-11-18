@@ -102,8 +102,4 @@ export class RunStore {
 	getByToolCallId(toolCallId: string): RunRecord | undefined {
 		return this.byToolCallId.get(toolCallId)?.[0];
 	}
-
-	get size(): number {
-		return this.records.length;
-	}
 }

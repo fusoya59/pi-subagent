@@ -14,6 +14,7 @@ import { DynamicBorder, getMarkdownTheme } from "@earendil-works/pi-coding-agent
 import {
 	Container,
 	Markdown,
+	matchesKey,
 	type SelectItem,
 	SelectList,
 	Spacer,
@@ -62,21 +63,39 @@ function requireTui(ctx: ExtensionCommandContext): boolean {
 }
 
 /**
- * Scrollable full-screen text. The user pages through the content with
- * the arrow keys. The title line shows the current position.
+ * Scrollable full-screen text for one of several items. The user scrolls
+ * with the arrow keys. When the screen has more than one item, the left
+ * and right keys move to the item before or after the current item, and
+ * wrap around at the ends. The title line shows the current position.
+ * Esc returns to the list that opened the screen.
  */
-async function showScrollScreen(
+async function showScrollScreen<T>(
 	ctx: ExtensionCommandContext,
-	title: string,
-	buildContent: (theme: ThemeLike) => Container,
+	items: T[],
+	startIndex: number,
+	getTitle: (item: T) => string,
+	buildContent: (item: T, theme: ThemeLike) => Container,
 ): Promise<void> {
 	await ctx.ui.custom<void>((tui, theme, keybindings, done) => {
-		const content = buildContent(theme);
+		const hasNeighbours = items.length > 1;
+		let index = startIndex;
+		let content = buildContent(items[index], theme);
 		const topBorder = new DynamicBorder((s) => theme.fg("accent", s));
 		const bottomBorder = new DynamicBorder((s) => theme.fg("accent", s));
 		let cachedWidth: number | undefined;
 		let cachedLines: string[] = [];
 		let scrollTop = 0;
+
+		// Show another item: build its content anew and start at the top.
+		// The step wraps around at both ends of the list.
+		const showItem = (step: number): void => {
+			index = (index + step + items.length) % items.length;
+			content = buildContent(items[index], theme);
+			cachedWidth = undefined;
+			cachedLines = [];
+			scrollTop = 0;
+			tui.requestRender();
+		};
 
 		const viewportHeight = () =>
 			Math.max(SCROLL_VIEWPORT_MIN, Math.min(tui.terminal.rows - 6, SCROLL_VIEWPORT_MAX));
@@ -97,12 +116,21 @@ async function showScrollScreen(
 				clampScroll();
 				const height = viewportHeight();
 				const body = cachedLines.slice(scrollTop, scrollTop + height);
-				const position =
-					cachedLines.length > height
-						? theme.fg("dim", `  [${scrollTop + 1}-${scrollTop + body.length} of ${cachedLines.length}]`)
-						: "";
-				const titleLine = truncateToWidth(theme.fg("toolTitle", theme.bold(title)) + position, width);
-				const footer = truncateToWidth(theme.fg("dim", "↑↓ scroll · PgUp/PgDn page · Esc close"), width);
+				const marks: string[] = [];
+				if (cachedLines.length > height) {
+					marks.push(`[${scrollTop + 1}-${scrollTop + body.length} of ${cachedLines.length}]`);
+				}
+				if (hasNeighbours) marks.push(`${index + 1}/${items.length}`);
+				const position = marks.length > 0 ? theme.fg("dim", `  ${marks.join(" · ")}`) : "";
+				const titleLine = truncateToWidth(
+					theme.fg("toolTitle", theme.bold(getTitle(items[index]))) + position,
+					width,
+				);
+				const navHint = hasNeighbours ? "←→ run · " : "";
+				const footer = truncateToWidth(
+					theme.fg("dim", `${navHint}↑↓ scroll · PgUp/PgDn page · Esc back`),
+					width,
+				);
 				return [
 					...topBorder.render(width),
 					titleLine,
@@ -115,6 +143,16 @@ async function showScrollScreen(
 				if (keybindings.matches(data, "tui.select.cancel")) {
 					done(undefined);
 					return;
+				}
+				if (hasNeighbours) {
+					if (matchesKey(data, "left")) {
+						showItem(-1);
+						return;
+					}
+					if (matchesKey(data, "right")) {
+						showItem(1);
+						return;
+					}
 				}
 				const height = viewportHeight();
 				let moved = false;
@@ -260,21 +298,22 @@ function addListHeader(container: Container, runs: RunRecord[], theme: ThemeLike
 	);
 }
 
-/** Select list of runs, newest first. Returns the selected record, or null on cancel. */
-async function showRunList(ctx: ExtensionCommandContext, store: RunStore): Promise<RunRecord | null> {
-	const runs = store.allNewestFirst();
-	if (runs.length === 0) {
-		ctx.ui.notify("No subagent runs in this session yet. Delegate a task to a subagent first.", "info");
-		return null;
-	}
-
-	const items: SelectItem[] = runs.map((run) => ({
-		value: String(run.number),
+/**
+ * Select list of runs, newest first. The selection starts at startIndex.
+ * Returns the index of the selected run, or null on cancel.
+ */
+async function showRunList(
+	ctx: ExtensionCommandContext,
+	runs: RunRecord[],
+	startIndex: number,
+): Promise<number | null> {
+	const items: SelectItem[] = runs.map((run, index) => ({
+		value: String(index),
 		label: `${run.number} ${plainStatusIcon(run.result.status)} ${run.result.agent}`,
 		description: runItemDescription(run.result),
 	}));
 
-	const selectedNumber = await ctx.ui.custom<string | null>((tui, theme, _keybindings, done) => {
+	const selectedIndex = await ctx.ui.custom<string | null>((tui, theme, _keybindings, done) => {
 		const container = new Container();
 		container.addChild(new DynamicBorder((s) => theme.fg("accent", s)));
 		addListHeader(container, runs, theme);
@@ -288,8 +327,11 @@ async function showRunList(ctx: ExtensionCommandContext, store: RunStore): Promi
 		});
 		selectList.onSelect = (item) => done(item.value);
 		selectList.onCancel = () => done(null);
+		selectList.setSelectedIndex(startIndex);
 		container.addChild(selectList);
-		container.addChild(new Text(theme.fg("dim", "↑↓ move · Enter open · Esc close"), 1, 0));
+		container.addChild(
+			new Text(theme.fg("dim", "↑↓ move · Enter open · ←→ change run in detail · Esc close"), 1, 0),
+		);
 		container.addChild(new DynamicBorder((s) => theme.fg("accent", s)));
 
 		return {
@@ -303,8 +345,8 @@ async function showRunList(ctx: ExtensionCommandContext, store: RunStore): Promi
 		};
 	});
 
-	if (!selectedNumber) return null;
-	return store.get(Number(selectedNumber)) ?? null;
+	if (selectedIndex === null) return null;
+	return Number(selectedIndex);
 }
 
 /** Configuration and system prompt of one agent. */
@@ -336,8 +378,15 @@ function buildAgentContent(agent: AgentConfig, theme: ThemeLike): Container {
 	return container;
 }
 
-/** Select list of agents. Returns the selected agent, or null on cancel. */
-async function showAgentList(ctx: ExtensionCommandContext, agents: AgentConfig[]): Promise<AgentConfig | null> {
+/**
+ * Select list of agents. The selection starts at startIndex.
+ * Returns the selected agent, or null on cancel.
+ */
+async function showAgentList(
+	ctx: ExtensionCommandContext,
+	agents: AgentConfig[],
+	startIndex: number,
+): Promise<AgentConfig | null> {
 	const items: SelectItem[] = agents.map((agent) => ({
 		value: agent.name,
 		label: agent.name,
@@ -358,6 +407,7 @@ async function showAgentList(ctx: ExtensionCommandContext, agents: AgentConfig[]
 		});
 		selectList.onSelect = (item) => done(item.value);
 		selectList.onCancel = () => done(null);
+		selectList.setSelectedIndex(startIndex);
 		container.addChild(selectList);
 		container.addChild(new Text(theme.fg("dim", "↑↓ move · Enter open · Esc close"), 1, 0));
 		container.addChild(new DynamicBorder((s) => theme.fg("accent", s)));
@@ -378,7 +428,12 @@ async function showAgentList(ctx: ExtensionCommandContext, agents: AgentConfig[]
 }
 
 async function showAgentDetail(ctx: ExtensionCommandContext, agent: AgentConfig): Promise<void> {
-	await showScrollScreen(ctx, `Subagent · ${agent.name}`, (theme) => buildAgentContent(agent, theme));
+	await showScrollScreen(ctx, [agent], 0, (item) => `Subagent · ${item.name}`, buildAgentContent);
+}
+
+/** Title of the detail screen of one run. */
+function runTitle(run: RunRecord): string {
+	return `Run ${run.number} · ${run.result.agent}`;
 }
 
 /**
@@ -422,8 +477,14 @@ export function registerSubagentCommands(pi: ExtensionAPI, runStore: RunStore): 
 				return;
 			}
 
-			const selected = await showAgentList(ctx, agents);
-			if (selected) await showAgentDetail(ctx, selected);
+			// Esc in the detail view returns to the list at the same agent.
+			let startIndex = 0;
+			for (;;) {
+				const selected = await showAgentList(ctx, agents, startIndex);
+				if (!selected) return;
+				await showAgentDetail(ctx, selected);
+				startIndex = agents.indexOf(selected);
+			}
 		},
 	});
 
@@ -432,18 +493,19 @@ export function registerSubagentCommands(pi: ExtensionAPI, runStore: RunStore): 
 		handler: async (_args, ctx) => {
 			if (!requireTui(ctx)) return;
 
-			if (runStore.size === 0) {
+			const runs = runStore.allNewestFirst();
+			if (runs.length === 0) {
 				ctx.ui.notify("No subagent runs in this session yet. Delegate a task to a subagent first.", "info");
 				return;
 			}
 
-			const run = await showRunList(ctx, runStore);
-			if (run) {
-				await showScrollScreen(
-					ctx,
-					`Run ${run.number} · ${run.result.agent}`,
-					(theme) => buildRunContent(run, theme),
-				);
+			// Esc in the detail view returns to the list at the same run.
+			let startIndex = 0;
+			for (;;) {
+				const index = await showRunList(ctx, runs, startIndex);
+				if (index === null) return;
+				await showScrollScreen(ctx, runs, index, runTitle, buildRunContent);
+				startIndex = index;
 			}
 		},
 	});

@@ -81,10 +81,10 @@ The extension adds three commands. All need interactive mode.
 | Command | Purpose |
 |---|---|
 | `/subagent-list` | List the available agents. Enter opens the configuration and system prompt. |
-| `/subagent-runs` | Browse the runs of the current session. Enter opens the transcript, usage, and cost. |
+| `/subagent-runs` | Browse the runs of the current session. Enter opens the transcript, usage, and cost. In the detail view, `←`/`→` go to the run before or after and wrap around at the ends. |
 | `/subagent-widget` | Toggle the live progress widget on or off. |
 
-Keys: `↑↓`/`PgUp/PgDn` move or scroll, `Enter` opens, `Esc` closes.
+Keys: `↑↓`/`PgUp/PgDn` move or scroll, `←→` change the run in the run detail view, `Enter` opens, `Esc` goes back to the list, and `Esc` in a list closes the command.
 
 Runs survive a restart and `/reload`. Direct runs rebuild from the session branch with their full transcripts. Nested runs, such as codemode calls, restore from summary entries and a transcript cache at `~/.pi/agent/subagent-transcripts/` (files older than 14 days are deleted).
 
