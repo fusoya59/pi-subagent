@@ -5,6 +5,7 @@
   "keywords": [
     "pi-package"
   ],
+  "license": "MIT",
   "peerDependencies": {
     "@earendil-works/pi-agent-core": "*",
     "@earendil-works/pi-ai": "*",

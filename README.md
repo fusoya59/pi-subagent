@@ -16,6 +16,8 @@ Then run `/reload` in Pi.
 
 The extension discovers agents from `~/.pi/agent/agents/`; project agents require `agentScope: "project"` or "both".
 
+This package is a fork of the Pi `subagent` example extension. It uses the MIT license; see [LICENSE](LICENSE).
+
 ## Example Agents
 
 The package does not load these files. Copy the ones you want to `~/.pi/agent/agents/` to use them.
