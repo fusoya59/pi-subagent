@@ -37,15 +37,26 @@ import {
 } from "./render.ts";
 import type { RunRecord, RunStore } from "./runs-store.ts";
 import { updateLiveWidget, type LiveWidgetContext } from "./live.ts";
-import type { SingleResult } from "./types.ts";
 
-const TASK_PREVIEW_LENGTH = 70;
 const SCROLL_VIEWPORT_MAX = 40;
 const SCROLL_VIEWPORT_MIN = 10;
+/** Space between the label column and the description of a run list item. */
+const LABEL_COLUMN_GAP = 2;
+/**
+ * Zero-width space at the start of a run description. The select list trims
+ * the description, which removes the left padding of the first column. This
+ * character is not white space and takes no space in the terminal, so the
+ * padding of the first column stays and the turns are right-aligned.
+ */
+const DESCRIPTION_ANCHOR = "\u200B";
 
-function taskPreview(task: string): string {
+/** First line of the task, at most maxLength characters. The mark of a cut counts. */
+function taskPreview(task: string, maxLength: number): string {
 	const oneLine = task.split("\n")[0] ?? "";
-	return oneLine.length > TASK_PREVIEW_LENGTH ? `${oneLine.slice(0, TASK_PREVIEW_LENGTH)}...` : oneLine;
+	if (oneLine.length <= maxLength) return oneLine;
+	// There is no room for the three characters of the cut mark.
+	if (maxLength <= 3) return oneLine.slice(0, maxLength);
+	return `${oneLine.slice(0, maxLength - 3)}...`;
 }
 
 function sectionHeader(theme: ThemeLike, label: string): Text {
@@ -262,10 +273,67 @@ function buildRunContent(record: RunRecord, theme: ThemeLike): Container {
 	return container;
 }
 
-/** One line per list item: turns, cost, and task preview. */
-function runItemDescription(r: SingleResult): string {
-	const cost = r.usage.cost ? `$${r.usage.cost.toFixed(4)}` : "$0";
-	return `${r.usage.turns}t · ${cost} · ${taskPreview(r.task)}`;
+/** One list row, split into columns so that each column starts at the same place. */
+interface RunRow {
+	/** Run number in a fixed gutter, status icon, and agent name. */
+	label: string;
+	turns: string;
+	cost: string;
+}
+
+function buildRunRow(record: RunRecord, numberWidth: number): RunRow {
+	const r = record.result;
+	return {
+		label: `${String(record.number).padStart(numberWidth)} ${plainStatusIcon(r.status)} ${r.agent}`,
+		turns: `${r.usage.turns}t`,
+		cost: `$${r.usage.cost.toFixed(4)}`,
+	};
+}
+
+/** Width of the widest value, in characters. All column values are one column wide. */
+function widestValue(values: string[]): number {
+	return values.reduce((widest, value) => Math.max(widest, value.length), 0);
+}
+
+/** Right-align a value in a column of the given width. */
+function rightAlign(value: string, width: number): string {
+	return value.padStart(width);
+}
+
+/**
+ * Length of the task preview in a dialog of the given width. The select list
+ * uses two columns for the selection prefix and two columns after the
+ * description. Each of the two column separators is three columns wide.
+ */
+function taskPreviewLength(columns: number, labelWidth: number, turnsWidth: number, costWidth: number): number {
+	const rest = 2 + labelWidth + turnsWidth + costWidth + 2 * 3 + 2;
+	return Math.max(0, columns - rest);
+}
+
+/** Items of the run list, newest first, and the width of their label column. */
+interface RunList {
+	items: SelectItem[];
+	labelWidth: number;
+}
+
+/**
+ * Select-list items of the runs, newest first. The run number, the turns,
+ * and the cost use fixed columns, so that the separators and the task
+ * previews line up. The task preview fills the width that is left.
+ */
+function runListItems(runs: RunRecord[], columns: number): RunList {
+	const numberWidth = widestValue(runs.map((run) => String(run.number)));
+	const rows = runs.map((run) => buildRunRow(run, numberWidth));
+	const turnsWidth = widestValue(rows.map((row) => row.turns));
+	const costWidth = widestValue(rows.map((row) => row.cost));
+	const labelWidth = widestValue(rows.map((row) => row.label)) + LABEL_COLUMN_GAP;
+	const taskLength = taskPreviewLength(columns, labelWidth, turnsWidth, costWidth);
+	const items = rows.map((row, index) => {
+		const parts = [DESCRIPTION_ANCHOR + rightAlign(row.turns, turnsWidth), rightAlign(row.cost, costWidth)];
+		if (taskLength > 0) parts.push(taskPreview(runs[index].result.task, taskLength));
+		return { value: String(index), label: row.label, description: parts.join(" · ") };
+	});
+	return { items, labelWidth };
 }
 
 /** Duration between the first run start and the last run finish. */
@@ -307,24 +375,26 @@ async function showRunList(
 	runs: RunRecord[],
 	startIndex: number,
 ): Promise<number | null> {
-	const items: SelectItem[] = runs.map((run, index) => ({
-		value: String(index),
-		label: `${run.number} ${plainStatusIcon(run.result.status)} ${run.result.agent}`,
-		description: runItemDescription(run.result),
-	}));
-
 	const selectedIndex = await ctx.ui.custom<string | null>((tui, theme, _keybindings, done) => {
+		// Size the label column to its content. The default column is wider
+		// and leaves a large gap before the turns.
+		const { items, labelWidth } = runListItems(runs, tui.terminal.columns);
 		const container = new Container();
 		container.addChild(new DynamicBorder((s) => theme.fg("accent", s)));
 		addListHeader(container, runs, theme);
 
-		const selectList = new SelectList(items, Math.min(items.length, 12), {
-			selectedPrefix: (text) => theme.fg("accent", text),
-			selectedText: (text) => theme.fg("accent", text),
-			description: (text) => theme.fg("muted", text),
-			scrollInfo: (text) => theme.fg("dim", text),
-			noMatch: (text) => theme.fg("warning", text),
-		});
+		const selectList = new SelectList(
+			items,
+			Math.min(items.length, 12),
+			{
+				selectedPrefix: (text) => theme.fg("accent", text),
+				selectedText: (text) => theme.fg("accent", text),
+				description: (text) => theme.fg("muted", text),
+				scrollInfo: (text) => theme.fg("dim", text),
+				noMatch: (text) => theme.fg("warning", text),
+			},
+			{ minPrimaryColumnWidth: labelWidth, maxPrimaryColumnWidth: labelWidth },
+		);
 		selectList.onSelect = (item) => done(item.value);
 		selectList.onCancel = () => done(null);
 		selectList.setSelectedIndex(startIndex);
